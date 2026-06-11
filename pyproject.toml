@@ -1,0 +1,19 @@
+[project]
+name = "voice-clone-dataset-pipeline"
+version = "1.0.0"
+description = "抖音博主单人音色语音数据集构建流水线 — 全自动 Demucs + pyannote + Whisper 方案"
+requires-python = ">=3.10"
+authors = [
+    {name = "Voice Clone Pipeline"},
+]
+license = {text = "MIT"}
+
+[project.scripts]
+# 方便直接运行
+voice-clone-pipeline = "pipeline.run_pipeline:main"
+
+[dependency-groups]
+
+[[tool.uv.index]]
+url = "https://pypi.org/simple"
+default = true

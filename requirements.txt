@@ -1,0 +1,46 @@
+# ============================================================
+# 抖音博主语音克隆数据集流水线 - 依赖清单
+# Usage:  uv pip install -r requirements.txt
+# Or:     uv sync (if using pyproject.toml)
+# ============================================================
+
+# --- 核心 ML / 音频处理 ---
+torch>=2.0.0
+torchaudio>=2.0.0
+numpy>=1.24.0
+scipy>=1.10.0
+librosa>=0.10.0
+soundfile>=0.12.1
+resampy>=0.4.2
+
+# --- 视频下载 ---
+yt-dlp>=2023.10.0
+
+# --- VAD 语音活动检测 ---
+silero-vad>=4.0.0
+
+# --- 说话人日志 (需 HF token) ---
+pyannote.audio>=3.1.0
+pyannote.core>=5.0.0
+
+# --- 说话人嵌入 ---
+speechbrain>=0.5.15
+
+# --- 人声/伴奏分离 (Demucs) ---
+demucs>=4.0.0
+
+# --- ASR 语音识别 ---
+openai-whisper>=20231117
+
+# --- 音频质量指标 ---
+pyloudnorm>=0.1.1
+
+# --- 可视化 / 抽检 ---
+gradio>=4.0.0
+matplotlib>=3.7.0
+pandas>=2.0.0
+tqdm>=4.66.0
+
+# --- 配置 / I/O ---
+pyyaml>=6.0
+huggingface-hub>=0.20.0

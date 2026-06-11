@@ -1,0 +1,36 @@
+# 数据目录（自动生成）
+data/
+
+# 日志
+logs/
+
+# Python 虚拟环境
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# 临时文件
+*.tmp
+*.log
+.DS_Store
+Thumbs.db
+
+# 预训练模型（手动下载）
+pretrained_models/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# uv
+uv.lock
+raw/
+*.zip

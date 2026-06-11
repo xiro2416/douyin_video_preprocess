@@ -1,0 +1,109 @@
+# ============================================================
+# 全流水线配置中心
+# ============================================================
+
+# --- 博主信息 ---
+blogger:
+  douyin_url: "https://www.douyin.com/user/MS4wLjABAAAAhiJ1QEuBKBAQbCIcWZryAP6q_Fd70xQXnadLxfDlpRYAw1qhQIkFQ407qDY6EsER?from_tab_name=main"
+  speaker_name: "target_blogger"
+  language: "zh"
+
+# --- 路径 ---
+paths:
+  raw_videos: "./data/01_raw_videos"
+  extracted_audio: "./data/02_extracted_audio"
+  demucs_output: "./data/03_demucs_output"
+  diarization_output: "./data/04_diarization"
+  segments: "./data/04_diarization/segments"
+  diarization_ad_output: "./data/04_diarization_ad"
+  asr_output: "./data/05_asr_output"
+  dataset: "./data/06_dataset"
+  logs: "./logs"
+
+# --- 下载 ---
+download:
+  format: "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
+  limit_rate: "10M"
+  sleep_interval: 5
+  max_sleep_interval: 15
+  max_downloads: 0  # 0 = 无限制
+
+# --- 音频提取 ---
+audio_extract:
+  sample_rate: 48000
+  channels: 1  # mono
+  codec: "pcm_s16le"
+  output_format: "wav"
+
+# --- Demucs 分离 ---
+demucs:
+  model: "htdemucs"     # 4 茎模型（vocals + no_vocals），更快更小
+  shifts: 6             # 多次分离取平均（论文用 10，6 是质量/速度折中）
+  overlap: 0.25
+  segment: 7           # 最大安全整数值（模型训练上限 7.8s）
+
+# --- 频谱重叠检测 ---
+overlap:
+  frame_length: 2048
+  hop_length: 512
+  correlation_threshold: 0.5
+  energy_threshold_ratio: 0.05  # 相对于峰值的比例
+
+# --- VAD ---
+vad:
+  min_speech_duration_ms: 500
+  min_silence_duration_ms: 700
+  threshold: 0.5
+
+# --- 多说话人分离 (pyannote) ---
+diarization_ad:
+  model: "pyannote/speaker-diarization-3.1"
+  min_segment_duration: 0.5
+  hf_token: ""  # 填入你的 HuggingFace token，需先接受 pyannote 模型条款
+
+# --- 说话人日志 ---
+diarization:
+  model: "pyannote/speaker-diarization-3.1"
+  min_speakers: 1
+  max_speakers: 5
+  similarity_threshold: 0.6  # ECAPA-TDNN cosine 相似度阈值
+
+# --- 说话人注册 ---
+speaker_registration:
+  method: "auto"  # auto | manual
+  # auto: 自动从视频中挖掘高质量独白段
+
+# --- 质量滤镜 ---
+quality_filter:
+  min_snr_db: 1.0  # Demucs 处理后改用宽松阈值
+  min_duration_sec: 1.5
+  max_duration_sec: 15.0
+  target_loudness_db: -26.0
+  loudness_tolerance_db: 8.0  # Demucs 处理后放宽响度容差
+  max_dc_offset: 0.01
+  max_clipping_ratio: 0.001  # 0.1%
+  speech_confidence_threshold: 0.85
+
+# --- ASR ---
+asr:
+  model: "large-v3"
+  language: "zh"
+  no_speech_threshold: 0.6
+  temperature: 0.2
+  word_timestamps: true
+  condition_on_previous_text: false
+
+# --- 数据集 ---
+dataset:
+  min_total_minutes: 30  # 低于此值告警
+  min_segment_seconds: 1.0
+  max_segment_seconds: 15.0
+  speaker_name: "target_blogger"
+  language: "ZH"
+  train_split: 0.95
+  eval_split: 0.05
+
+# --- Gradio 抽检 ---
+inspection:
+  sample_per_video: 5
+  fail_threshold: 0.2  # 20% 被标记为❌则丢弃该视频所有段
