@@ -15,7 +15,7 @@ paths:
   demucs_output: "./data/03_demucs_output"
   diarization_output: "./data/04_diarization"
   segments: "./data/04_diarization/segments"
-  diarization_ad_output: "./data/04_diarization_ad"
+  # diarization_ad_output 已合并到 diarization_output
   asr_output: "./data/05_asr_output"
   dataset: "./data/06_dataset"
   logs: "./logs"
@@ -42,47 +42,19 @@ demucs:
   overlap: 0.25
   segment: 7           # 最大安全整数值（模型训练上限 7.8s）
 
-# --- 频谱重叠检测 ---
-overlap:
-  frame_length: 2048
-  hop_length: 512
-  correlation_threshold: 0.5
-  energy_threshold_ratio: 0.05  # 相对于峰值的比例
-
-# --- VAD ---
-vad:
-  min_speech_duration_ms: 500
-  min_silence_duration_ms: 700
-  threshold: 0.5
-
-# --- 多说话人分离 (pyannote) ---
+# --- 跨视频说话人分离 (Stage 04, pyannote) ---
 diarization_ad:
-  model: "pyannote/speaker-diarization-3.1"
-  min_segment_duration: 0.5
-  hf_token: ""  # 填入你的 HuggingFace token，需先接受 pyannote 模型条款
+  model: "pyannote/speaker-diarization-3.1"  # 主模型 (降级兜底: speaker-diarization community)
+  hf_token: ""                                 # HuggingFace token (优先环境变量 HF_TOKEN)
+  device: "auto"                               # auto / cuda / cpu
+  min_segment_duration: 0.5                    # 最短语音片段 (秒)
+  max_segment_duration: 10.0                   # 最长语音片段 (秒), VAD 切分阈值
+  min_speakers: 1                              # 单音频最少说话人数
+  max_speakers: 5                              # 单音频最多说话人数
+  clustering_threshold: 0.5                    # AHC 凝聚聚类余弦距离阈值 (越小越严格)
+  enable_outlier_detection: true               # 离群检测: 单样本孤立簇标记为 UNKNOWN
+  save_interval: 10                            # 每处理 N 个文件保存一次 checkpoint
 
-# --- 说话人日志 ---
-diarization:
-  model: "pyannote/speaker-diarization-3.1"
-  min_speakers: 1
-  max_speakers: 5
-  similarity_threshold: 0.6  # ECAPA-TDNN cosine 相似度阈值
-
-# --- 说话人注册 ---
-speaker_registration:
-  method: "auto"  # auto | manual
-  # auto: 自动从视频中挖掘高质量独白段
-
-# --- 质量滤镜 ---
-quality_filter:
-  min_snr_db: 1.0  # Demucs 处理后改用宽松阈值
-  min_duration_sec: 1.5
-  max_duration_sec: 15.0
-  target_loudness_db: -26.0
-  loudness_tolerance_db: 8.0  # Demucs 处理后放宽响度容差
-  max_dc_offset: 0.01
-  max_clipping_ratio: 0.001  # 0.1%
-  speech_confidence_threshold: 0.85
 
 # --- ASR ---
 asr:

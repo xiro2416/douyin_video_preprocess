@@ -21,6 +21,7 @@
 """
 
 import argparse
+import importlib.util
 import json
 import os
 import sys
@@ -59,9 +60,13 @@ def run_stage(stage_id: str, config: dict, logger, **kwargs):
     logger.info(f"{'=' * 60}\n")
 
     try:
-        module = __import__(
-            f"pipeline.{module_name}", fromlist=[func_name]
-        )
+        # 使用 importlib.util 从文件路径加载模块（避免数字开头的模块名无法 import）
+        module_path = os.path.join(os.path.dirname(__file__), f"{module_name}.py")
+        spec = importlib.util.spec_from_file_location(module_name, module_path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"无法加载模块: {module_path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
         func = getattr(module, func_name)
 
         # 调用函数
