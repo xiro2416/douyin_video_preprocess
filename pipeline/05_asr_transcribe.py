@@ -14,6 +14,7 @@ import shutil
 from typing import Dict, List, Optional
 
 import numpy as np
+import torch
 from tqdm import tqdm
 
 from pipeline.utils import (
@@ -157,12 +158,13 @@ def transcribe_all(
     logger.info(f"待转写: {len(segments_meta)} 段")
     logger.info(f"=" * 60)
 
-    # 加载 Whisper
+    # 加载 Whisper（先 CPU 后 GPU 以降低峰值显存占用）
     logger.info("正在加载 Whisper 模型（首次运行会下载）...")
     import whisper
 
-    model = whisper.load_model(asr_cfg["model"])
-    device = "cuda" if hasattr(model, "device") and model.device else "cpu"
+    model = whisper.load_model(asr_cfg["model"], device="cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = model.to(device)
     logger.info(f"Whisper 已加载 (device={device})")
 
     paths = config["paths"]

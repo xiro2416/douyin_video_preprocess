@@ -45,7 +45,7 @@ demucs:
 # --- 跨视频说话人分离 (Stage 04, pyannote) ---
 diarization_ad:
   model: "pyannote/speaker-diarization-3.1"  # 主模型 (降级兜底: speaker-diarization community)
-  hf_token: ""                                 # HuggingFace token (优先环境变量 HF_TOKEN)
+  hf_token: ""  # 请替换为你的 HF token 或设置环境变量 HF_TOKEN                                 # HuggingFace token (优先环境变量 HF_TOKEN)
   device: "auto"                               # auto / cuda / cpu
   min_segment_duration: 0.5                    # 最短语音片段 (秒)
   max_segment_duration: 10.0                   # 最长语音片段 (秒), VAD 切分阈值
@@ -53,6 +53,7 @@ diarization_ad:
   max_speakers: 5                              # 单音频最多说话人数
   clustering_threshold: 0.5                    # AHC 凝聚聚类余弦距离阈值 (越小越严格)
   enable_outlier_detection: true               # 离群检测: 单样本孤立簇标记为 UNKNOWN
+  merge_gap: 0.5                               # 合并同一说话人相邻段的最大间隔 (秒)
   save_interval: 10                            # 每处理 N 个文件保存一次 checkpoint
 
 

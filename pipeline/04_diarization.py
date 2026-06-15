@@ -222,6 +222,14 @@ def _load_diarization_pipeline(config: dict):
     return pipe, model_name, device
 
 
+def _set_merge_gap(pipeline, config: dict):
+    """通过 pyannote 原生的 min_duration_off 合并同说话人近段"""
+    diar_cfg = config.get("diarization_ad", {})
+    merge_gap = diar_cfg.get("merge_gap", 0.0)
+    if merge_gap > 0:
+        pipeline.segmentation.min_duration_off = merge_gap
+
+
 def _run_diarization(
     tensor: torch.Tensor,
     sample_rate: int,
@@ -835,6 +843,12 @@ def process_all(config: dict, logger=None) -> List[dict]:
     pipeline, model_name, device = _load_diarization_pipeline(config)
     logger.info(f"已加载: {model_name} (device={device}, {time.time() - t0:.1f}s)")
 
+    # 启用 pyannote 原生合并：同一说话人间隔 < merge_gap 的段自动合并
+    _set_merge_gap(pipeline, config)
+    merge_gap = config.get("diarization_ad", {}).get("merge_gap", 0.0)
+    if merge_gap > 0:
+        logger.info(f"  合并间隙: min_duration_off={merge_gap}s (pyannote 原生)")
+
     # ── 4. 逐文件处理 ──
     skipped = 0
     failed = 0
@@ -873,9 +887,10 @@ def process_all(config: dict, logger=None) -> List[dict]:
                 completed_videos.add(video_id)
                 continue
 
-            # 4c. VAD 二次切分: 对 >10s 的段按停顿边界切开
-            n_before = len(diar_segments)
             max_seg_dur = diar_cfg.get("max_segment_duration", 10.0)
+
+            # 4c. VAD 二次切分: 对 >max_seg_dur 的段按停顿边界切开
+            n_before = len(diar_segments)
             diar_segments = _resegment_long_segments(
                 diar_segments, raw_audio, raw_sr,
                 max_duration=max_seg_dur,
