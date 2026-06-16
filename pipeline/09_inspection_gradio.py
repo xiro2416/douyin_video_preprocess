@@ -154,8 +154,7 @@ class InspectionApp:
         asr = seg.get("asr", {})
         if asr:
             text = asr.get("text", "")
-            confidence = asr.get("confidence", 0)
-            return f"{text}\n\n(置信度: {confidence:.2f})"
+            return f"{text}"
         return "（无 ASR 文本）"
 
     def get_segment_info(self) -> str:

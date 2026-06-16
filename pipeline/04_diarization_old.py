@@ -209,14 +209,22 @@ def _load_diarization_pipeline(config: dict):
                 f"    3. 网络可访问 huggingface.co"
             )
 
-    # 设备适配 (支持 config 中 device: auto/cuda/cpu)
-    device_str = diar_cfg.get("device", "auto")
-    if device_str == "cpu":
+    # --- 设备适配: 优先全局 gpu 配置，次之 diarization 专用配置 ---
+    global_gpu = config.get("gpu", {})
+    if not global_gpu.get("enabled", True):
         device = torch.device("cpu")
-    elif device_str == "cuda":
-        device = torch.device("cuda")
-    else:  # auto
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    else:
+        device_str = diar_cfg.get("device", "auto")
+        cvd = global_gpu.get("cuda_visible", "").strip()
+        if cvd:
+            os.environ["CUDA_VISIBLE_DEVICES"] = cvd
+        if device_str == "cpu":
+            device = torch.device("cpu")
+        elif device_str == "cuda":
+            device_id = global_gpu.get("device_id", 0)
+            device = torch.device(f"cuda:{device_id}" if torch.cuda.device_count() > device_id else "cuda")
+        else:  # auto
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     pipe = pipe.to(device)
 
     return pipe, model_name, device

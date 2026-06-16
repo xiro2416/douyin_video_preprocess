@@ -8,7 +8,7 @@
   uv run python -m pipeline.run_pipeline --all
 
   # 单步运行（指定起始阶段）
-  uv run python -m pipeline.run_pipeline --from 03
+  uv run python -m pipeline.run_pipeline --from 03 --to 06
 
   # 从中间阶段继续
   uv run python -m pipeline.run_pipeline --from 05 --to 07
@@ -41,8 +41,8 @@ from pipeline.utils import (
 STAGES = {
     "01": ("下载视频", "01_download", "download_videos"),
     "02": ("提取音频", "02_extract_audio", "extract_all"),
-    "03": ("Demucs 分离", "03_demucs_separate", "separate_all"),
-    "04": ("说话人日志", "04_diarization", "process_all"),
+    "03": ("MDX23C 分离", "03_mdx23c_separate", "separate_all"),
+    "04": ("说话人日志", "04_diarization_community", "process_all"),
     "05": ("ASR 转写", "05_asr_transcribe", "main"),
     "06": ("数据集打包", "06_dataset_build", "main"),
 }
@@ -112,18 +112,28 @@ def detect_stages_to_run(config: dict) -> list:
     if has_videos and not has_audio:
         pending.append("02")
 
-    # 检查 03: 是否有 Demucs 输出
-    demucs_dir = os.path.join(
-        paths["demucs_output"], config["demucs"]["model"]
-    )
-    has_demucs = os.path.isdir(demucs_dir) and len(os.listdir(demucs_dir)) > 0
+    # 检查 03: 是否有分离输出（优先检查 MDX23C，回退到 Demucs）
+    voice_sep_dir = paths.get("voice_sep_output", "")
+    if voice_sep_dir and os.path.isdir(voice_sep_dir):
+        # 新 MDX23C 输出
+        mdx23c_model = config.get("mdx23c", {}).get("model", "mdx23c")
+        model_short = mdx23c_model.replace(".ckpt", "").rsplit("/", 1)[-1]
+        check_dir = os.path.join(voice_sep_dir, model_short)
+        has_voice_sep = os.path.isdir(check_dir) and len(os.listdir(check_dir)) > 0
+    else:
+        # 回退旧 Demucs 输出
+        demucs_dir = os.path.join(
+            paths.get("demucs_output", "./data/03_demucs_output"),
+            config.get("demucs", {}).get("model", "htdemucs"),
+        )
+        has_voice_sep = os.path.isdir(demucs_dir) and len(os.listdir(demucs_dir)) > 0
 
-    if has_audio and not has_demucs:
+    if has_audio and not has_voice_sep:
         pending.append("03")
 
     # 检查 04: 是否有段元数据
     meta_04 = os.path.join(paths["diarization_output"], "segments_meta.json")
-    if has_demucs and not os.path.exists(meta_04):
+    if has_voice_sep and not os.path.exists(meta_04):
         pending.append("04")
 
     # 检查 05: ASR 结果

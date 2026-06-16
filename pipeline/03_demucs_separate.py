@@ -1,9 +1,11 @@
 """
 Stage 3: Demucs 人声分离 (Python API — no ffmpeg needed)
 ==========================================================
-使用 htdemucs + --two-stems vocals 分离出人声茎。
-改用 Demucs Python API 直接加载，绕过 torchaudio / ffmpeg 依赖。
+使用 Demucs Python API 直接加载，绕过 torchaudio / ffmpeg 依赖。
 使用 soundfile 读取音频，numpy → tensor 传给 Demucs 推理。
+
+首次运行需要模型文件。本地仓库位于 pretrained_models/，
+优先使用本地模型（无需联网），fallback 到远程下载。
 """
 
 import os
@@ -15,6 +17,28 @@ import soundfile as sf
 import torch
 from tqdm import tqdm
 
+# ── PyTorch 2.6+ 兼容：注册 demucs 自定义类到 safe globals ──
+# PyTorch 2.6 开始 torch.load 默认 weights_only=True，
+# 而 demucs .th 文件包含序列化的模型类，需要注册才能加载。
+import demucs.hdemucs as _hd
+import demucs.htdemucs as _ht
+
+_torch_classes = [
+    _hd.HDemucs, _hd.HEncLayer, _hd.HDecLayer, _hd.ScaledEmbedding, _hd.MultiWrap,
+    _ht.HTDemucs,
+]
+try:
+    from demucs.demucs import DConv
+    _torch_classes.append(DConv)
+except ImportError:
+    pass
+try:
+    from demucs.transformer import CrossTransformerEncoder
+    _torch_classes.append(CrossTransformerEncoder)
+except ImportError:
+    pass
+torch.serialization.add_safe_globals(_torch_classes)
+
 from pipeline.utils import (
     ensure_dir,
     get_audio_files,
@@ -22,10 +46,56 @@ from pipeline.utils import (
     load_config,
 )
 
+# 本地模型仓库（项目根目录下的 pretrained_models/）
+_LOCAL_MODEL_REPO = Path(__file__).resolve().parent.parent / "pretrained_models"
+
+
+def _load_model(demucs_cfg: dict, device: str):
+    """加载 Demucs 模型，优先本地仓库，fallback 远程下载。"""
+    # PyTorch 2.6+ 默认 weights_only=True，而 demucs 库内部
+    # (states.py) 调用 torch.load 未传此参数，需要临时覆盖。
+    _orig_torch_load = torch.load
+    def _demucs_compat_load(path, map_location='cpu'):
+        return _orig_torch_load(path, map_location=map_location, weights_only=False)
+
+    from demucs import pretrained
+
+    model_name = demucs_cfg.get("model", "htdemucs")
+    repo_path = demucs_cfg.get("model_repo", "").strip()
+
+    if repo_path:
+        repo = Path(repo_path)
+    elif _LOCAL_MODEL_REPO.is_dir() and any(_LOCAL_MODEL_REPO.glob("*.th")):
+        repo = _LOCAL_MODEL_REPO
+    else:
+        repo = None
+
+    # ── 临时 monkey-patch torch.load 以兼容 PyTorch 2.6+ ──
+    torch.load = _demucs_compat_load
+
+    if repo:
+        try:
+            model = pretrained.get_model(model_name, repo=repo)
+        except Exception as e:
+            get_logger("03_demucs_separate").warning(
+                f"本地模型加载失败: {e}，回退到远程下载..."
+            )
+            model = pretrained.get_model(model_name)
+    else:
+        model = pretrained.get_model(model_name)
+
+    # ── 恢复原始 torch.load ──
+    torch.load = _orig_torch_load
+
+    model.to(device)
+    model.eval()
+    return model
+
 
 def run_demucs_separation(
     audio_path: str,
     output_dir: str,
+    model,
     model_name: str = "htdemucs",
     shifts: int = 3,
     overlap: float = 0.25,
@@ -52,14 +122,11 @@ def run_demucs_separation(
         logger.info(f"正在分离: {basename}")
 
     try:
-        from demucs import pretrained
         from demucs.apply import apply_model
         from demucs.audio import convert_audio_channels
 
         # ── 1. 用 soundfile 读取音频（不需要 ffmpeg/torchaudio）──
         wav_np, sr = sf.read(audio_path)
-        if wav_np.ndim > 1:
-            wav_np = wav_np.mean(axis=1)  # 降混到单声道
         wav_np = wav_np.astype(np.float32)
 
         # ── 2. 转为 torch tensor [channels, samples] ──
@@ -71,25 +138,19 @@ def run_demucs_separation(
             wav = resample_frac(wav, sr, 44100)
             sr = 44100
 
-        # ── 4. 确保立体声 (htdemucs 是 4 源模型，期望 2 声道) ──
+        # ── 4. 确保立体声 ──
         wav = convert_audio_channels(wav, 2)
 
-        # ── 5. 加载模型 ──
-        model = pretrained.get_model(model_name)
-        model.to(device)
-        model.eval()
-
-        # ── 6. 归一化 & 分离 ──
-        ref = wav.mean(0, keepdim=True)
-        wav_centered = wav - ref.mean()
-        std_val = wav_centered.std()
-        if std_val > 1e-8:
-            wav_centered = wav_centered / std_val
+        # ── 5. 归一化 & 分离 ──
+        mean = wav.mean().item()
+        std = wav.std().item()
+        if std > 1e-8:
+            wav = (wav - mean) / std
 
         with torch.no_grad():
             sources = apply_model(
                 model,
-                wav_centered.unsqueeze(0),  # [1, ch, N]
+                wav.unsqueeze(0),  # [1, ch, N]
                 device=device,
                 shifts=shifts,
                 split=True,
@@ -98,36 +159,31 @@ def run_demucs_separation(
                 segment=segment,
             )[0]
 
-        # 反归一化
-        if std_val > 1e-8:
-            sources = sources * std_val
-        sources = sources + ref
+        # 反归一化（加标量，匹配官方实现）
+        if std > 1e-8:
+            sources = sources * std + mean
 
-        # ── 7. 提取 vocals / no_vocals ──
-        # htdemucs 顺序: drums, bass, other, vocals
-        idx_vocals = model.sources.index("vocals")
+        # ── 6. 提取 vocals / no_vocals ──
+        sources_list = getattr(model, 'sources', ['drums', 'bass', 'other', 'vocals'])
+        idx_vocals = sources_list.index("vocals")
         vocals = sources[idx_vocals].cpu()
-        # no_vocals = drums + bass + other
+        # no_vocals = 其他茎之和
         no_vocals = torch.zeros_like(vocals)
-        for i, name in enumerate(model.sources):
+        for i, name in enumerate(sources_list):
             if i != idx_vocals:
                 no_vocals += sources[i].cpu()
 
-        # ── 8. 保存（使用 soundfile，避免 torchaudio 的 FFmpeg 依赖）──
+        # ── 7. 保存（使用 soundfile，避免 torchaudio 的 FFmpeg 依赖）──
         def _save_stem(tensor, path, sample_rate, clip="rescale"):
             """保存音频茎，带 clamp / rescale 保护"""
-            import numpy as np
             arr = tensor.numpy()
-            # 将多声道 [C, N] 转 [N, C] (soundfile 格式)
             if arr.ndim == 2:
                 arr = arr.T
-            # clip mode: rescale
             peak = np.max(np.abs(arr))
             if clip == "rescale" and peak > 1.0:
                 arr = arr / peak
             elif clip == "clamp":
                 arr = np.clip(arr, -1.0, 1.0)
-            # 目标采样率 44100
             sf.write(path, arr, sample_rate, subtype="PCM_16")
 
         _save_stem(vocals, vocals_path, sr, clip="rescale")
@@ -145,7 +201,7 @@ def run_demucs_separation(
 
 
 def separate_all(config: dict, logger=None):
-    """批量运行 Demucs 分离"""
+    """批量运行 Demucs 分离（零输入或全部失败时抛异常终止流水线）"""
     paths = config["paths"]
     demucs_cfg = config["demucs"]
 
@@ -156,17 +212,39 @@ def separate_all(config: dict, logger=None):
 
     audio_files = get_audio_files(paths["extracted_audio"])
     if not audio_files:
-        logger.warning("没有找到音频文件，请先运行 02_extract_audio.py")
-        return []
+        raise RuntimeError(
+            "Stage 03 错误：没有找到音频文件。请先运行 Stage 02 (音频提取)。"
+        )
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    # ── GPU 设备选择（优先全局配置）──
+    gpu_cfg = config.get("gpu", {})
+    if not gpu_cfg.get("enabled", True):
+        device = "cpu"
+        os.environ["CUDA_VISIBLE_DEVICES"] = ""
+    else:
+        cvd = gpu_cfg.get("cuda_visible", "").strip()
+        if cvd:
+            os.environ["CUDA_VISIBLE_DEVICES"] = cvd
+        device_id = gpu_cfg.get("device_id", 0)
+        if torch.cuda.is_available():
+            device = f"cuda:{device_id}" if torch.cuda.device_count() > device_id else "cuda"
+        else:
+            device = "cpu"
+
     logger.info(f"=" * 60)
     logger.info(f"Stage 3: Demucs 人声分离 (Python API)")
-    logger.info(f"模型: {demucs_cfg['model']} (--two-stems vocals)")
-    logger.info(f"shifts={demucs_cfg['shifts']}, overlap={demucs_cfg['overlap']}, segment={demucs_cfg['segment']}")
+    model_name = demucs_cfg.get("model", "htdemucs")
+    logger.info(f"模型: {model_name}")
+    logger.info(f"本地仓库: {_LOCAL_MODEL_REPO if _LOCAL_MODEL_REPO.is_dir() else '远程下载'}")
+    logger.info(f"shifts={demucs_cfg.get('shifts', 6)}, overlap={demucs_cfg.get('overlap', 0.25)}, segment={demucs_cfg.get('segment', 7)}")
     logger.info(f"设备: {device}")
     logger.info(f"共 {len(audio_files)} 个音频")
     logger.info(f"=" * 60)
+
+    # ── 加载模型（单例，所有文件复用）──
+    logger.info("加载 Demucs 模型...")
+    model = _load_model(demucs_cfg, device)
+    logger.info(f"模型已加载: {type(model).__name__}")
 
     results = []
 
@@ -175,10 +253,11 @@ def separate_all(config: dict, logger=None):
 
         stems = run_demucs_separation(
             audio_path, demucs_dir,
-            model_name=demucs_cfg["model"],
-            shifts=demucs_cfg["shifts"],
-            overlap=demucs_cfg["overlap"],
-            segment=demucs_cfg["segment"],
+            model=model,
+            model_name=model_name,
+            shifts=demucs_cfg.get("shifts", 6),
+            overlap=demucs_cfg.get("overlap", 0.25),
+            segment=demucs_cfg.get("segment", 7),
             device=device,
             logger=logger,
         )
@@ -191,6 +270,13 @@ def separate_all(config: dict, logger=None):
         logger.info(f"✓ {basename}")
 
     logger.info(f"完成: {len(results)}/{len(audio_files)} 个音频分离成功")
+
+    if len(results) == 0 and len(audio_files) > 0:
+        raise RuntimeError(
+            f"Stage 03 错误：所有 {len(audio_files)} 个音频分离均失败。"
+            f" 请检查模型文件是否完整（pretrained_models/ 目录）或 GPU 显存是否充足。"
+        )
+
     return results
 
 

@@ -91,7 +91,7 @@ show_menu() {
     echo "  2) 自动恢复 (检测未完成的阶段)"
   echo "  3) 仅下载视频 (Stage 1)"
   echo "  4) 提取音频 (Stage 2)"
-  echo "  5) Demucs 分离 (Stage 3)"
+  echo "  5) MDX23C 分离 (Stage 3)"
   echo "  6) 说话人日志 (Stage 4)"
   echo "  7) ASR 转写 (Stage 5)"
   echo "  8) 数据集打包 (Stage 6)"

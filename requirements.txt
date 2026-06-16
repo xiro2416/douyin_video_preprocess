@@ -26,8 +26,11 @@ pyannote.core>=5.0.0
 # --- 说话人嵌入 ---
 speechbrain>=0.5.15
 
-# --- 人声/伴奏分离 (Demucs) ---
+# --- 人声/伴奏分离 (Demucs · 旧版) ---
 demucs>=4.0.0
+
+# --- 人声/伴奏分离 (MDX23C · 新版，替代 Demucs) ---
+audio-separator>=0.15.0
 
 # --- ASR 语音识别 ---
 openai-whisper>=20231117

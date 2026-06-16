@@ -1,7 +1,9 @@
 """
-Stage 5: Whisper ASR 转写与文本置信度验证
-===========================================
-使用 OpenAI Whisper large-v3 对每个语音段进行转写。
+Stage 5: Paraformer-large-zh ASR 转写与文本置信度验证
+====================================================
+使用 FunASR Paraformer-large-zh 对每个语音段进行转写。
+模型从 HuggingFace 下载（通过 hf-mirror.com 加速）。
+
 验证策略：
   1. 文本不为空且包含中文字符（中文博主）
   2. 文本长度合理（太短可能是噪声）
@@ -24,6 +26,26 @@ from pipeline.utils import (
 )
 
 
+def _resolve_device(config: dict) -> torch.device:
+    """
+    根据全局 GPU 配置解析推理设备。
+    优先级: config.gpu.enabled → config.gpu.cuda_visible → config.gpu.device_id
+    """
+    gpu_cfg = config.get("gpu", {})
+    if not gpu_cfg.get("enabled", True):
+        os.environ["CUDA_VISIBLE_DEVICES"] = ""
+        return torch.device("cpu")
+    cvd = gpu_cfg.get("cuda_visible", "").strip()
+    if cvd:
+        os.environ["CUDA_VISIBLE_DEVICES"] = cvd
+    device_id = gpu_cfg.get("device_id", 0)
+    if torch.cuda.is_available():
+        if torch.cuda.device_count() > device_id:
+            return torch.device(f"cuda:{device_id}")
+        return torch.device("cuda")
+    return torch.device("cpu")
+
+
 def contains_chinese(text: str) -> bool:
     """检查文本是否包含中文字符"""
     return bool(re.search(r'[一-鿿㐀-䶿]', text))
@@ -36,66 +58,55 @@ def transcribe_segment(
     logger=None,
 ) -> Optional[Dict]:
     """
-    对单个音频段进行 Whisper 转写。
+    对单个音频段进行 Paraformer 转写。
 
     返回:
         {
             "text": "转写文本",
             "language": "zh",
-            "confidence": float,
-            "no_speech_prob": float,
             "duration": float,
             "valid": bool,
             "reason": str
         }
         若无效则 valid=False，reason 说明原因。
     """
-    asr_cfg = config["asr"]
-
-    # 读取音频
+    # 读取音频（Paraformer 使用 16kHz mono）
     wav, sr = read_audio(audio_path)
+    duration = len(wav) / sr
 
-    # 如果太短，Whisper 可能不准
-    if len(wav) / sr < 0.5:
+    # 如果太短，跳过
+    if duration < 0.5:
         return {
             "text": "",
-            "confidence": 0.0,
-            "no_speech_prob": 1.0,
             "valid": False,
             "reason": "too_short",
         }
 
-    # Whisper 转写
-    result = model.transcribe(
-        wav,
-        language=asr_cfg["language"],
-        temperature=asr_cfg["temperature"],
-        no_speech_threshold=asr_cfg["no_speech_threshold"],
-        condition_on_previous_text=asr_cfg["condition_on_previous_text"],
-        word_timestamps=asr_cfg["word_timestamps"],
-        verbose=False,
-    )
+    try:
+        # Paraformer 转写（返回 list[dict]）
+        result_list = model.generate(input=wav, hotword='', use_itn=True)
 
-    # 提取结果
-    text = result.get("text", "").strip()
-    segments_info = result.get("segments", [])
+        if not result_list:
+            return {
+                "text": "",
+                "valid": False,
+                "reason": "empty_result",
+            }
 
-    # 置信度评估
-    no_speech_prob = 0.0
-    avg_confidence = 0.0
+        result = result_list[0]
+        text = result.get("text", "").strip()
 
-    if segments_info:
-        no_speech_prob = max(
-            s.get("no_speech_prob", 0) for s in segments_info
-        )
-        # 平均 token 置信度
-        all_probs = []
-        for s in segments_info:
-            for token in s.get("tokens", []):
-                if isinstance(token, dict) and "probability" in token:
-                    all_probs.append(token["probability"])
-        if all_probs:
-            avg_confidence = float(np.mean(all_probs))
+        # 获取时间戳信息（Paraformer 支持 sentence-level timestamp）
+        sentence_info = result.get("sentence_info", [])
+
+    except Exception as e:
+        if logger:
+            logger.warning(f"转写失败 {audio_path}: {e}")
+        return {
+            "text": "",
+            "valid": False,
+            "reason": f"transcribe_error: {e}",
+        }
 
     # 验证逻辑
     valid = True
@@ -123,13 +134,11 @@ def transcribe_segment(
 
     return {
         "text": text,
-        "language": result.get("language", "zh"),
-        "confidence": avg_confidence,
-        "no_speech_prob": no_speech_prob,
-        "duration": len(wav) / sr,
+        "language": "zh",
+        "duration": duration,
         "valid": valid,
         "reason": reason,
-        "segments_count": len(segments_info),
+        "sentence_count": len(sentence_info) if sentence_info else 0,
     }
 
 
@@ -154,18 +163,32 @@ def transcribe_all(
 
     logger.info(f"=" * 60)
     logger.info(f"Stage 5: ASR 转写与验证")
-    logger.info(f"模型: Whisper {asr_cfg['model']}, 语言: {asr_cfg['language']}")
+    logger.info(f"模型: Paraformer-large-zh (FunASR, hub={asr_cfg.get('hub', 'hf')})")
     logger.info(f"待转写: {len(segments_meta)} 段")
     logger.info(f"=" * 60)
 
-    # 加载 Whisper（先 CPU 后 GPU 以降低峰值显存占用）
-    logger.info("正在加载 Whisper 模型（首次运行会下载）...")
-    import whisper
+    # 设置 hf-mirror 加速下载（如果使用 HuggingFace hub）
+    if asr_cfg.get("hub", "hf") == "hf":
+        hf_endpoint = asr_cfg.get("hf_endpoint", "https://hf-mirror.com")
+        os.environ["HF_ENDPOINT"] = hf_endpoint
+        logger.info(f"HuggingFace 镜像: {hf_endpoint}")
 
-    model = whisper.load_model(asr_cfg["model"], device="cpu")
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = model.to(device)
-    logger.info(f"Whisper 已加载 (device={device})")
+    # 加载 Paraformer 模型
+    logger.info("正在加载 Paraformer-large-zh 模型（首次运行会下载）...")
+    from funasr import AutoModel
+
+    device = _resolve_device(config)
+    device_str = f"cuda:{device.index}" if device.type == "cuda" else "cpu"
+    logger.info(f"推理设备: {device_str}")
+
+    model_kwargs = {
+        "model": asr_cfg["model"],
+        "hub": asr_cfg.get("hub", "hf"),
+        "device": device_str,
+    }
+    logger.info(f"模型参数: {model_kwargs}")
+    model = AutoModel(**model_kwargs)
+    logger.info("Paraformer 模型已加载")
 
     paths = config["paths"]
     asr_audio_dir = os.path.join(paths["asr_output"], "audio")
@@ -178,6 +201,8 @@ def transcribe_all(
         "text_too_short": 0,
         "no_chinese": 0,
         "non_linguistic": 0,
+        "empty_result": 0,
+        "transcribe_error": 0,
     }
 
     for seg in tqdm(segments_meta, desc="ASR 转写"):
@@ -233,15 +258,28 @@ def main(config=None, logger=None):
         logger = setup_logger("05_asr_transcribe", config["paths"]["logs"])
 
     # 读取 Stage 04 的说话人日志结果
+    # 优先 segments_meta.json，fallback 到 segments_meta_community.json
     meta_path = os.path.join(
         config["paths"]["diarization_output"], "segments_meta.json"
     )
     if not os.path.exists(meta_path):
-        logger.error(f"未找到段元数据: {meta_path}")
+        meta_path = os.path.join(
+            config["paths"]["diarization_output"], "segments_meta_community.json"
+        )
+    if not os.path.exists(meta_path):
+        logger.error(f"未找到段元数据 (尝试过 segments_meta.json 和 segments_meta_community.json)")
         return
 
     with open(meta_path, "r", encoding="utf-8") as f:
         segments = json.load(f)
+
+    # 过滤：仅保留 TARGET 且无重叠的片段
+    before = len(segments)
+    segments = [
+        s for s in segments
+        if s.get("speaker") == "TARGET" and not s.get("is_overlap", False)
+    ]
+    logger.info(f"过滤后保留 {len(segments)}/{before} 段 (仅 TARGET + 无重叠)")
 
     passed = transcribe_all(segments, config, logger=logger)
 

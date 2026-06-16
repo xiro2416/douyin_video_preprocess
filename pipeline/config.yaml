@@ -2,6 +2,14 @@
 # 全流水线配置中心
 # ============================================================
 
+# --- 全局 GPU 设置 ---
+# 所有 GPU 阶段（03 Demucs, 04 说话人分离, 05 ASR）共用此配置
+gpu:
+  enabled: true                    # true = 使用 GPU, false = 强制 CPU
+  cuda_visible: ""                 # CUDA_VISIBLE_DEVICES，如 "0" 或 "0,1,2"
+                                   # 空字符串 = 不限制（使用所有可用 GPU）
+  device_id: 0                     # 默认 GPU 设备索引，多卡时指定推理设备
+
 # --- 博主信息 ---
 blogger:
   douyin_url: "https://www.douyin.com/user/MS4wLjABAAAAhiJ1QEuBKBAQbCIcWZryAP6q_Fd70xQXnadLxfDlpRYAw1qhQIkFQ407qDY6EsER?from_tab_name=main"
@@ -13,6 +21,7 @@ paths:
   raw_videos: "./data/01_raw_videos"
   extracted_audio: "./data/02_extracted_audio"
   demucs_output: "./data/03_demucs_output"
+  voice_sep_output: "./data/03_mdx23c_output"   # MDX23C 分离输出
   diarization_output: "./data/04_diarization"
   segments: "./data/04_diarization/segments"
   # diarization_ad_output 已合并到 diarization_output
@@ -37,15 +46,98 @@ audio_extract:
 
 # --- Demucs 分离 ---
 demucs:
-  model: "htdemucs"     # 4 茎模型（vocals + no_vocals），更快更小
-  shifts: 6             # 多次分离取平均（论文用 10，6 是质量/速度折中）
+  model: "htdemucs_ft_vocals"     # htdemucs_ft 人声专用子模型（单模型，4茎）
+  shifts: 10            # 多次分离取平均（论文推荐值，质量优先）
   overlap: 0.25
-  segment: 7           # 最大安全整数值（模型训练上限 7.8s）
+  segment: 7           # htdemucs_ft 训练 segment=7.8s，7 为安全取整
 
-# --- 跨视频说话人分离 (Stage 04, pyannote) ---
+# --- MDX23C 人声/背景分离 (Stage 03, 替代 Demucs) ---
+# 使用 audio_separator 库加载 UVR MDX23C 模型，ONNX Runtime 推理。
+# 模型通过 HuggingFace 镜像 (hf-mirror.com) 下载到本地 pretrained_models/ 目录。
+mdx23c:
+  model: "MDX23C-8KFFT-InstVoc_HQ_2.ckpt"            # HuggingFace 中的文件名
+  repo_filename: "models/MDX23C/MDX23C-8KFFT-InstVoc_HQ_2.ckpt"  # HF 仓库中的完整路径
+  model_repo: "Politrees/UVR_resources"               # HuggingFace 仓库
+  hf_endpoint: "https://hf-mirror.com"                # HF 镜像加速
+  local_model_dir: "./pretrained_models"               # 本地模型缓存目录
+  segment: 256                                         # 处理块大小（帧）
+  overlap: 8                                           # 重叠参数
+
+# --- 跨视频说话人分离 (Stage 04v2, pyannote community-1) ---
+# 使用 pyannote/speaker-diarization-community-1 管道。
+# 独立于上方 diarization_ad 版本，两者可共存。
+# 使用方法: 在调用脚本前将 config 中 diarization_community 启用即可。
+diarization_community:
+  model: "pyannote/speaker-diarization-community-1"
+  hf_token: "YOUR_HF_TOKEN_HERE"  # 请设置你的 HF token，或设置环境变量 HF_TOKEN
+  device: "auto"                               # auto / cuda / cpu
+
+  # --- 管道构建时参数 (init-time) ---
+  # 修改后需重建 pipeline 实例 (重启进程) 才能生效
+  segmentation_step: 0.1                       # 分割滑动步长 (占窗口时长比例)
+                                               # 0.1=90%重叠(最精确但最慢)
+                                               # 0.25=75%重叠, 0.5=50%重叠(更快)
+  embedding_batch_size: 32                     # 嵌入提取批大小 (GPU 可增大)
+  embedding_exclude_overlap: true              # 排除重叠帧，提升 VBx 聚类嵌入质量
+  segmentation_batch_size: 32                  # 分割模型批大小
+
+  # --- 管道运行时参数 ---
+  # 无需重建，动态调整
+  min_duration_off: 0.3                        # 合并同一说话人短间隙 (秒)
+
+  # --- VBx 聚类参数 ---
+  # threshold: AHC 粗聚类距离阈值 (0.0-2.0, 默认 0.6)
+  #   越低越激进合并 → 越少说话人; 越高越保守 → 越多说话人
+  vbx_threshold: 0.6
+  # Fa: VBx 声学似然权重 (0.01-0.5, 默认 0.07)
+  #   越大 → 声学区分越细 → 越多说话人
+  vbx_Fa: 0.07
+  # Fb: VBx 说话人正则化系数 (0.01-15.0, 默认 0.8)
+  #   越大 → 对新说话人惩罚越强 → 越少说话人
+  vbx_Fb: 0.8
+
+  # --- 推理约束 ---
+  min_speakers: 1                              # 单音频最少说话人数
+  max_speakers: 5                              # 单音频最多说话人数
+
+  # --- 后处理 ---
+  min_segment_duration: 0.5                    # 最短语音片段 (秒)
+  max_segment_duration: 10.0                   # 最长语音片段 (秒), VAD 切分阈值
+
+  # --- 跨视频 AHC 聚类 ---
+  clustering_threshold: 0.5                    # 跨视频 AHC 余弦距离阈值 (越小越严格)
+  enable_outlier_detection: true               # 离群检测: 单样本孤立簇标记为 UNKNOWN
+  outlier_factor: 1.5                          # 离群阈值系数 (×threshold)
+
+  # --- TARGET 精度激进方案 (precision 模式) ---
+  precision:
+    enabled: True                              # 主开关，false 时以下全部忽略
+
+    # VBx 单视频聚类收紧 (覆盖上方对应参数)
+    vbx_threshold: 0.7                         # 原 0.6
+    vbx_Fa: 0.10                               # 原 0.07
+    vbx_Fb: 0.5                                # 原 0.8
+
+    # 跨视频聚类收紧 (覆盖上方 clustering_threshold)
+    clustering_threshold: 0.55                 # 原 0.5
+
+    # TARGET 簇嵌入距离门控
+    embedding_gate: true                       # 距离 TARGET 质心太远 → UNCERTAIN
+    embedding_max_distance: 0.5                # cosine 距离阈值，越小越严格
+
+    # TARGET 簇内 IQR 离群检测
+    iqr_outlier_detection: true                # 均值距离 > Q3+1.5×IQR → UNCERTAIN
+
+    # TARGET 段专属最短时长 (覆盖上方 min_segment_duration)
+    min_segment_duration: 1.5                  # 原 0.5
+
+  save_interval: 10                            # 每处理 N 个文件保存一次 checkpoint
+
+
+# --- 跨视频说话人分离 (Stage 04, pyannote 3.1) ---
 diarization_ad:
   model: "pyannote/speaker-diarization-3.1"  # 主模型 (降级兜底: speaker-diarization community)
-  hf_token: ""  # 请替换为你的 HF token 或设置环境变量 HF_TOKEN                                 # HuggingFace token (优先环境变量 HF_TOKEN)
+  hf_token: "YOUR_HF_TOKEN_HERE"  # 请设置你的 HF token，或设置环境变量 HF_TOKEN
   device: "auto"                               # auto / cuda / cpu
   min_segment_duration: 0.5                    # 最短语音片段 (秒)
   max_segment_duration: 10.0                   # 最长语音片段 (秒), VAD 切分阈值
@@ -57,14 +149,16 @@ diarization_ad:
   save_interval: 10                            # 每处理 N 个文件保存一次 checkpoint
 
 
-# --- ASR ---
+# --- ASR (FunASR Paraformer-large-zh) ---
 asr:
-  model: "large-v3"
+  model: "funasr/paraformer-zh"  # HuggingFace 模型 ID
+  hub: "hf"                         # 模型来源: hf (HuggingFace) / ms (ModelScope)
   language: "zh"
+  hf_endpoint: "https://hf-mirror.com"  # HuggingFace 镜像加速
+  use_itn: true                         # 逆文本正则化（数字、标点等）
+  batch_size_s: 300                     # 动态批处理时长（秒），0=逐条处理
   no_speech_threshold: 0.6
-  temperature: 0.2
-  word_timestamps: true
-  condition_on_previous_text: false
+  min_segment_duration: 0.5             # 最短有效段（秒）
 
 # --- 数据集 ---
 dataset:
