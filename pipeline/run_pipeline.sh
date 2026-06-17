@@ -95,7 +95,6 @@ show_menu() {
   echo "  6) 说话人日志 (Stage 4)"
   echo "  7) ASR 转写 (Stage 5)"
   echo "  8) 数据集打包 (Stage 6)"
-  echo "  9) 启动抽检台"
   echo "  q) 退出"
     echo ""
     read -rp "输入选项: " choice
@@ -109,8 +108,7 @@ show_menu() {
         6) run_stage 04 ;;
         7) run_stage 05 ;;              # 05=ASR
         8) run_stage 06 ;;              # 06=dataset
-        9) run_inspect ;;
-        
+
         q|Q) exit 0 ;;
         *) warn "无效选项"; show_menu ;;
     esac
@@ -133,12 +131,6 @@ run_stage() {
     $PYTHON -m pipeline.run_pipeline --from "$stage"
 }
 
-run_inspect() {
-    title "启动 Gradio 抽检台"
-    info "浏览器将自动打开 http://127.0.0.1:7860"
-    $PYTHON -m pipeline.run_pipeline --only-inspect
-}
-
 # ── 主入口 ────────────────────────────────────────────────────
 main() {
     cd "$PROJECT_DIR"
@@ -153,7 +145,6 @@ main() {
         case "$1" in
             --all|all)      run_all ;;
             --auto|auto)    run_auto ;;
-            --inspect)      run_inspect ;;
             --stage)        run_stage "${2:-01}" ;;
             *)              warn "未知参数: $1"; show_menu ;;
         esac

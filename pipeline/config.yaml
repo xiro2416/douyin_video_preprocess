@@ -8,7 +8,7 @@ gpu:
   enabled: true                    # true = 使用 GPU, false = 强制 CPU
   cuda_visible: ""                 # CUDA_VISIBLE_DEVICES，如 "0" 或 "0,1,2"
                                    # 空字符串 = 不限制（使用所有可用 GPU）
-  device_id: 0                     # 默认 GPU 设备索引，多卡时指定推理设备
+  device_id: 1                     # 默认 GPU 设备索引，多卡时指定推理设备
 
 # --- 博主信息 ---
 blogger:
@@ -22,11 +22,13 @@ paths:
   extracted_audio: "./data/02_extracted_audio"
   demucs_output: "./data/03_demucs_output"
   voice_sep_output: "./data/03_mdx23c_output"   # MDX23C 分离输出
+  ensemble_output: "./data/03_ensemble_output"   # Ensemble 融合输出
   diarization_output: "./data/04_diarization"
   segments: "./data/04_diarization/segments"
   # diarization_ad_output 已合并到 diarization_output
   asr_output: "./data/05_asr_output"
   dataset: "./data/06_dataset"
+  audio_evaluation_output: "./data/08_audio_evaluation"
   logs: "./logs"
 
 # --- 下载 ---
@@ -63,13 +65,30 @@ mdx23c:
   segment: 256                                         # 处理块大小（帧）
   overlap: 8                                           # 重叠参数
 
+# --- Ensemble 人声分离 (Stage 03, Demucs + MDX23C STFT 融合) ---
+# 将两个架构互补的模型在 STFT 域用软掩码平均融合。
+# enabled: true 后，run_pipeline.py 自动加载 03_ensemble_separate 作为 Stage 03。
+ensemble:
+  enabled: True                        # 是否启用 ensemble 模式
+  model_name: "demucs+mdx23c_ens"       # 输出子目录名
+  output_dir: "./data/03_ensemble_output"
+  target_sr: 44100                      # 统一输出采样率
+  # 融合权重 (相等权重=0.5/0.5)
+  demucs_weight: 0.5
+  mdx23c_weight: 0.5
+  # STFT 参数（各模型用各自原生分辨率，在融合分辨率下融合）
+  n_fft_demucs: 4096        # 对齐 Demucs 内部 nfft
+  n_fft_mdx23c: 8192        # 对齐 MDX23C-8KFFT 内部 n_fft
+  n_fft_fusion: 8192        # 融合目标分辨率
+  hop_length: 1024
+
 # --- 跨视频说话人分离 (Stage 04v2, pyannote community-1) ---
 # 使用 pyannote/speaker-diarization-community-1 管道。
 # 独立于上方 diarization_ad 版本，两者可共存。
 # 使用方法: 在调用脚本前将 config 中 diarization_community 启用即可。
 diarization_community:
   model: "pyannote/speaker-diarization-community-1"
-  hf_token: "YOUR_HF_TOKEN_HERE"  # 请设置你的 HF token，或设置环境变量 HF_TOKEN
+  hf_token: "${HF_TOKEN:-}"  # 请设置环境变量 HF_TOKEN
   device: "auto"                               # auto / cuda / cpu
 
   # --- 管道构建时参数 (init-time) ---
@@ -137,7 +156,7 @@ diarization_community:
 # --- 跨视频说话人分离 (Stage 04, pyannote 3.1) ---
 diarization_ad:
   model: "pyannote/speaker-diarization-3.1"  # 主模型 (降级兜底: speaker-diarization community)
-  hf_token: "YOUR_HF_TOKEN_HERE"  # 请设置你的 HF token，或设置环境变量 HF_TOKEN
+  hf_token: "${HF_TOKEN:-}"  # 请设置环境变量 HF_TOKEN
   device: "auto"                               # auto / cuda / cpu
   min_segment_duration: 0.5                    # 最短语音片段 (秒)
   max_segment_duration: 10.0                   # 最长语音片段 (秒), VAD 切分阈值
@@ -155,10 +174,13 @@ asr:
   hub: "hf"                         # 模型来源: hf (HuggingFace) / ms (ModelScope)
   language: "zh"
   hf_endpoint: "https://hf-mirror.com"  # HuggingFace 镜像加速
+  punc_model: "ct-punc"                 # 标点恢复模型（Paraformer 默认不输出标点）
+  punc_kwargs:                          # 标点模型参数（覆盖主 hub）
+    hub: "ms"                           # ct-punc 仅发布在 ModelScope，非 HuggingFace
   use_itn: true                         # 逆文本正则化（数字、标点等）
-  batch_size_s: 300                     # 动态批处理时长（秒），0=逐条处理
-  no_speech_threshold: 0.6
-  min_segment_duration: 0.5             # 最短有效段（秒）
+  confidence_threshold: 0.85            # token-level 置信度阈值 (0-1)
+                                         # 低于此值的段放入 fail/ 目录
+                                         # 0 = 不启用置信度过滤
 
 # --- 数据集 ---
 dataset:
@@ -170,7 +192,33 @@ dataset:
   train_split: 0.95
   eval_split: 0.05
 
-# --- Gradio 抽检 ---
-inspection:
-  sample_per_video: 5
-  fail_threshold: 0.2  # 20% 被标记为❌则丢弃该视频所有段
+# --- SNR + SFM + HNR 质量过滤 (Stage 04b) ---
+# 对 04_diarization 的 TARGET 段做三维质量过滤，
+# 在 ASR 前丢弃低质量片段。
+snr_filter:
+  enabled: false          # false = 跳过过滤，全部保留（改用 ASR 置信度过滤）
+  snr_threshold: 8.0     # dB, SNR ≥ 此值保留 (P10/P90 帧能量法)
+  sfm_threshold: 0.03     # 频谱平坦度 ≤ 此值保留 (~-20dB, 0=纯谐波/1=白噪声)
+  hnr_threshold: 4.0      # dB, HNR ≥ 此值保留 (谐波噪声比, 0-40dB)
+  vad_threshold: 0.5      # Silero VAD 语音概率阈值
+  min_speech_ratio: 0.5   # 段内最少语音帧占比，低于此值直接丢弃
+
+# --- 音频质量评价 (Stage 08, Qwen2-Audio-7B) ---
+# 用多模态大模型对最终数据集每段音频做自然语言评价。
+# 评价维度：语音清晰度、背景噪声/残留、录音质量、TTS 适用性、整体评分。
+audio_evaluation:
+  enabled: true                           # false = 跳过评价
+  model: "Qwen/Qwen2-Audio-7B-Instruct"  # HuggingFace 模型 ID
+  hf_endpoint: "https://hf-mirror.com"    # HuggingFace 镜像加速下载
+  torch_dtype: "bfloat16"                 # bfloat16 / float16 / auto
+  max_new_tokens: 256                     # 最大生成 token 数
+  eval_prompt: |
+    请作为语音质量评估专家，评价这段音频的质量。参考文本是："{text}"。
+    请从以下维度评价：
+    1. 语音清晰度（是否清晰可辨）
+    2. 背景噪声或音乐残留（是否纯净）
+    3. 录音质量（是否有失真、削波、断续等）
+    4. 是否适合用于语音合成(TTS)训练
+    5. 整体评分(1-5分)
+
+    请用中文给出简洁评价。

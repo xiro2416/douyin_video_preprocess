@@ -27,12 +27,12 @@ import os
 from typing import Dict, List
 
 import numpy as np
+import soundfile as sf
 
 from pipeline.utils import (
     ensure_dir,
     get_logger,
     load_config,
-    read_audio,
     write_audio,
     normalize_loudness,
 )
@@ -84,10 +84,12 @@ def build_dataset(
             logger.warning(f"音频文件不存在，跳过: {src}")
             continue
 
-        # 读取并归一化（峰值 → -26 LUFS 响度）
+        # 读取（保留原始采样率，不做重采样）
         dst_name = f"{seg_id}.wav"
         dst_path = os.path.join(audio_dir, dst_name)
-        wav, sr = read_audio(src)
+        wav, sr = sf.read(src)
+        if wav.ndim > 1:
+            wav = wav.mean(axis=1)  # 混音到 mono
         wav = wav / (np.max(np.abs(wav)) + 1e-8)  # 峰值归一化，防削波
         wav = normalize_loudness(wav, sr, target_db=-26.0)  # 响度归一化
         write_audio(dst_path, wav, sr)

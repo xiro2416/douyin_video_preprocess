@@ -1118,6 +1118,7 @@ def _discover_input_files(config: dict, logger) -> List[Tuple[str, str]]:
     发现待处理音频文件。
 
     优先级:
+    0. Ensemble 分离输出 (Demucs + MDX23C STFT 融合, 最高优先)
     1. MDX23C 分离输出 (新版 Stage 03)
     2. Demucs 分离输出 (旧版 Stage 03, 向后兼容)
     3. 原始音频目录 (Stage 02 兜底)
@@ -1125,6 +1126,24 @@ def _discover_input_files(config: dict, logger) -> List[Tuple[str, str]]:
     """
     paths = config["paths"]
     candidates = []
+
+    # ---- 优先级 0: Ensemble 输出 (最高优先) ----
+    ensemble_cfg = config.get("ensemble", {})
+    if ensemble_cfg.get("enabled", False):
+        ensemble_dir = ensemble_cfg.get(
+            "output_dir", paths.get("ensemble_output", "./data/03_ensemble_output")
+        )
+        if ensemble_dir and os.path.isdir(ensemble_dir):
+            model_name_dir = ensemble_cfg.get("model_name", "demucs+mdx23c_ens")
+            base = os.path.join(ensemble_dir, model_name_dir)
+            if os.path.isdir(base):
+                for video_dir in sorted(os.listdir(base)):
+                    vocals_path = os.path.join(base, video_dir, "vocals.wav")
+                    if os.path.isfile(vocals_path):
+                        candidates.append((vocals_path, video_dir))
+                if candidates:
+                    logger.info(f"输入源: Ensemble 输出 ({len(candidates)} 个 vocals.wav)")
+                    return candidates
 
     # ---- 优先级 1: MDX23C 输出 ----
     voice_sep_dir = paths.get("voice_sep_output", "")

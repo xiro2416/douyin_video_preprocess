@@ -8,13 +8,13 @@
   uv run python -m pipeline.run_pipeline --all
 
   # 单步运行（指定起始阶段）
-  uv run python -m pipeline.run_pipeline --from 03 --to 06
+  uv run python -m pipeline.run_pipeline --from 04 --to 06
 
   # 从中间阶段继续
   uv run python -m pipeline.run_pipeline --from 05 --to 07
 
-  # 仅运行 Gradio 抽检
-  uv run python -m pipeline.run_pipeline --only-inspect
+  # 仅运行音频评价
+  uv run python -m pipeline.run_pipeline --from 08 --to 08
 
   # 指定博主 URL（覆盖 config.yaml）
   uv run python -m pipeline.run_pipeline --all --url "https://..."
@@ -43,8 +43,11 @@ STAGES = {
     "02": ("提取音频", "02_extract_audio", "extract_all"),
     "03": ("MDX23C 分离", "03_mdx23c_separate", "separate_all"),
     "04": ("说话人日志", "04_diarization_community", "process_all"),
+    "04b": ("质量过滤", "04b_snr_filter", "filter_target_segments"),
     "05": ("ASR 转写", "05_asr_transcribe", "main"),
     "06": ("数据集打包", "06_dataset_build", "main"),
+    "07": ("数据分析", "07_analysis", "main"),
+    "08": ("音频评价", "08_audio_evaluation", "main"),
 }
 
 
@@ -54,6 +57,12 @@ def run_stage(stage_id: str, config: dict, logger, **kwargs):
     每个阶段模块应包含一个接受 (config, logger) 的入口函数。
     """
     stage_name, module_name, func_name = STAGES[stage_id]
+
+    # ── Stage 03 ensemble 覆写 ──
+    if stage_id == "03" and config.get("ensemble", {}).get("enabled", False):
+        module_name = "03_ensemble_separate"
+        stage_name = "Ensemble 分离 (Demucs+MDX23C)"
+        func_name = "separate_all"
 
     logger.info(f"\n{'=' * 60}")
     logger.info(f"▶ 阶段 {stage_id}: {stage_name}")
@@ -112,16 +121,35 @@ def detect_stages_to_run(config: dict) -> list:
     if has_videos and not has_audio:
         pending.append("02")
 
-    # 检查 03: 是否有分离输出（优先检查 MDX23C，回退到 Demucs）
-    voice_sep_dir = paths.get("voice_sep_output", "")
-    if voice_sep_dir and os.path.isdir(voice_sep_dir):
-        # 新 MDX23C 输出
-        mdx23c_model = config.get("mdx23c", {}).get("model", "mdx23c")
-        model_short = mdx23c_model.replace(".ckpt", "").rsplit("/", 1)[-1]
-        check_dir = os.path.join(voice_sep_dir, model_short)
-        has_voice_sep = os.path.isdir(check_dir) and len(os.listdir(check_dir)) > 0
-    else:
-        # 回退旧 Demucs 输出
+    # 检查 03: 是否有分离输出
+    # 优先检查 Ensemble 输出，然后 MDX23C，最后 Demucs
+    has_voice_sep = False
+    ensemble_cfg = config.get("ensemble", {})
+
+    # 1) Ensemble 输出（enabled 时优先）
+    if ensemble_cfg.get("enabled", False):
+        ensemble_dir = ensemble_cfg.get(
+            "output_dir", paths.get("ensemble_output", "./data/03_ensemble_output")
+        )
+        if os.path.isdir(ensemble_dir):
+            model_short = ensemble_cfg.get("model_name", "demucs+mdx23c_ens")
+            check_dir = os.path.join(ensemble_dir, model_short)
+            has_voice_sep = os.path.isdir(check_dir) and any(
+                os.path.isdir(os.path.join(check_dir, d))
+                for d in os.listdir(check_dir)
+            )
+
+    # 2) MDX23C 输出
+    if not has_voice_sep:
+        voice_sep_dir = paths.get("voice_sep_output", "")
+        if voice_sep_dir and os.path.isdir(voice_sep_dir):
+            mdx23c_model = config.get("mdx23c", {}).get("model", "mdx23c")
+            model_short = mdx23c_model.replace(".ckpt", "").rsplit("/", 1)[-1]
+            check_dir = os.path.join(voice_sep_dir, model_short)
+            has_voice_sep = os.path.isdir(check_dir) and len(os.listdir(check_dir)) > 0
+
+    # 3) Demucs 输出（最后回退）
+    if not has_voice_sep:
         demucs_dir = os.path.join(
             paths.get("demucs_output", "./data/03_demucs_output"),
             config.get("demucs", {}).get("model", "htdemucs"),
@@ -160,7 +188,6 @@ def auto_run(config: dict, logger):
 
     if not pending:
         logger.info("所有阶段似乎已完成！运行 --all 来强制重新运行。")
-        logger.info("或使用 --only-inspect 启动抽检台。")
         return
 
     logger.info(f"需要运行的阶段: {', '.join(pending)}")
@@ -200,13 +227,6 @@ def run_range(
     logger.info("\n指定范围执行完毕！")
 
 
-def run_inspection(config: dict, logger):
-    """仅启动 Gradio 抽检台"""
-    logger.info("启动 Gradio 抽检台...")
-    from pipeline.inspection_gradio import main
-    main()
-
-
 def main():
     parser = argparse.ArgumentParser(
         description="抖音博主语音克隆数据集全自动流水线",
@@ -215,31 +235,26 @@ def main():
 使用示例:
   python -m pipeline.run_pipeline --all          # 完整流水线
   python -m pipeline.run_pipeline --from 03       # 从 Stage 3 开始
-  python -m pipeline.run_pipeline --from 05 --to 07  # 运行 5-7 阶段
+  python -m pipeline.run_pipeline --from 05 --to 08  # 运行 5-8 阶段
   python -m pipeline.run_pipeline --auto          # 自动检测未完成阶段
-  python -m pipeline.run_pipeline --only-inspect  # 仅启动抽检台
         """
     )
 
     parser.add_argument(
         "--all", action="store_true",
-        help="运行全部 7 个阶段（完整流水线）"
+        help="运行全部 8 个阶段（完整流水线，含数据分析和音频评价）"
     )
     parser.add_argument(
         "--from", dest="from_stage", type=str,
-        help="起始阶段编号 (01-07)"
+        help="起始阶段编号 (01-08)"
     )
     parser.add_argument(
         "--to", dest="to_stage", type=str,
-        help="结束阶段编号 (01-07)"
+        help="结束阶段编号 (01-08)"
     )
     parser.add_argument(
         "--auto", action="store_true",
         help="自动检测并运行未完成的阶段"
-    )
-    parser.add_argument(
-        "--only-inspect", action="store_true",
-        help="仅启动 Gradio 抽检台"
     )
     parser.add_argument(
         "--url", type=str,
@@ -267,10 +282,7 @@ def main():
     logger.info(f"工作目录: {os.getcwd()}")
 
     try:
-        if args.only_inspect:
-            run_inspection(config, logger)
-
-        elif args.from_stage:
+        if args.from_stage:
             run_range(config, logger, args.from_stage, args.to_stage)
 
         elif args.auto:
